@@ -1,4 +1,13 @@
-const socket = io();
+// ===== 部署完 Worker 后，替换成你的 Cloudflare Worker 地址 =====
+const SERVER_URL = "https://你的worker名称.workers.dev";
+
+const socket = io(SERVER_URL, {
+  transports: ["websocket", "polling"],
+  upgrade: true,
+  reconnection: true, // 开启自动重连
+  reconnectionDelay: 2000,
+  reconnectionAttempts: 10
+});
 
 let currentRoomId = null;
 let myName = "";
@@ -25,6 +34,21 @@ startBtn.onclick = () => {
   gameBox.classList.remove("hidden");
   statusEl.textContent = "正在匹配中...";
 };
+
+socket.on("connect", () => {
+  addSystemMessage("已连接到服务器");
+  if (statusEl) statusEl.textContent = "已连接";
+});
+
+socket.on("disconnect", () => {
+  addSystemMessage("连接断开，正在自动重连...");
+  if (statusEl) statusEl.textContent = "连接断开，重连中";
+});
+
+socket.on("reconnect", () => {
+  addSystemMessage("重连成功！");
+  if (statusEl) statusEl.textContent = "已重连";
+});
 
 socket.on("system-message", (msg) => {
   addSystemMessage(msg);
@@ -69,13 +93,10 @@ function sendChat() {
 function renderGame(data) {
   const me = data.players.find((p) => p.name === myName);
   const turnPlayer = data.players.find((p) => p.id === data.turn);
-
   statusEl.textContent = `房间已连接`;
   turnInfoEl.textContent = `当前回合：${turnPlayer ? turnPlayer.name : "未知"}`;
   deckInfoEl.textContent = `牌库剩余：${data.deckCount}`;
-
   handEl.innerHTML = "";
-
   if (me) {
     me.hand.forEach((card) => {
       const btn = document.createElement("button");

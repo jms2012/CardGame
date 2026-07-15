@@ -5,15 +5,25 @@ const path = require("path");
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server);
 
+// Socket.io 跨域配置，兼容代理访问
+const io = new Server(server, {
+  cors: {
+    origin: "*",
+    methods: ["GET", "POST"],
+    credentials: true,
+    transports: ["websocket", "polling"]
+  },
+  allowEIO3: true
+});
+
+// 静态文件服务（本地测试用，部署后前端走Vercel不影响）
 app.use(express.static(path.join(__dirname, "public")));
 
 const PORT = process.env.PORT || 3000;
 
 // 等待匹配的玩家
 let waitingPlayer = null;
-
 // 房间数据
 const rooms = new Map();
 
@@ -64,7 +74,6 @@ io.on("connection", (socket) => {
         turn: waitingPlayer.id,
         started: true,
       };
-
       rooms.set(roomId, room);
 
       waitingPlayer.join(roomId);
@@ -82,10 +91,8 @@ io.on("connection", (socket) => {
         turn: room.turn,
         deckCount: room.deck.length,
       });
-
       waitingPlayer.emit("system-message", "已匹配到对手，游戏开始！");
       socket.emit("system-message", "已匹配到对手，游戏开始！");
-
       waitingPlayer = null;
     }
   });
@@ -93,22 +100,17 @@ io.on("connection", (socket) => {
   socket.on("draw-card", (roomId) => {
     const room = rooms.get(roomId);
     if (!room) return;
-
     if (room.turn !== socket.id) {
       socket.emit("system-message", "还没轮到你。");
       return;
     }
-
     const player = room.players.find((p) => p.id === socket.id);
     const card = drawCard(room);
-
     if (!card) {
       socket.emit("system-message", "牌库已经没有牌了。");
       return;
     }
-
     player.hand.push(card);
-
     io.to(roomId).emit("game-update", {
       players: room.players,
       turn: room.turn,
@@ -120,26 +122,20 @@ io.on("connection", (socket) => {
   socket.on("play-card", ({ roomId, card }) => {
     const room = rooms.get(roomId);
     if (!room) return;
-
     if (room.turn !== socket.id) {
       socket.emit("system-message", "还没轮到你。");
       return;
     }
-
     const player = room.players.find((p) => p.id === socket.id);
     const index = player.hand.indexOf(card);
-
     if (index === -1) {
       socket.emit("system-message", "你没有这张牌。");
       return;
     }
-
     player.hand.splice(index, 1);
-
-    // 简单规则：出牌后轮到对手
+    // 出牌后轮到对手
     const opponent = getOpponent(room, socket.id);
     room.turn = opponent.id;
-
     io.to(roomId).emit("game-update", {
       players: room.players,
       turn: room.turn,
@@ -151,7 +147,6 @@ io.on("connection", (socket) => {
   socket.on("chat", ({ roomId, message }) => {
     const room = rooms.get(roomId);
     if (!room) return;
-
     const player = room.players.find((p) => p.id === socket.id);
     io.to(roomId).emit("chat", {
       name: player?.name || "匿名",
@@ -161,11 +156,9 @@ io.on("connection", (socket) => {
 
   socket.on("disconnect", () => {
     console.log("disconnected:", socket.id);
-
     if (waitingPlayer && waitingPlayer.id === socket.id) {
       waitingPlayer = null;
     }
-
     // 清理房间
     for (const [roomId, room] of rooms.entries()) {
       const hasPlayer = room.players.some((p) => p.id === socket.id);
