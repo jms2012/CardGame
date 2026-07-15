@@ -1,5 +1,5 @@
 // ===== 部署完 Worker 后，替换成你的 Cloudflare Worker 地址 =====
-const SERVER_URL = "https://你的worker名称.workers.dev";
+const SERVER_URL = "https://cards.474804665.workers.dev/";
 
 const socket = io(SERVER_URL, {
   transports: ["websocket", "polling"],
