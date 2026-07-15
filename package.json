@@ -1,0 +1,24 @@
+{
+  "name": "card-game",
+  "version": "1.0.0",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "description": "no description :)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jms2012/CardGame.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/jms2012/CardGame/issues"
+  },
+  "homepage": "https://github.com/jms2012/CardGame#readme",
+  "dependencies": {
+    "express": "^5.2.1",
+    "socket.io": "^4.8.3"
+  }
+}

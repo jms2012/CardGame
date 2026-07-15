@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>联机卡牌小游戏</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="container">
+    <h1>联机卡牌小游戏</h1>
+
+    <div id="loginBox" class="panel">
+      <input id="nameInput" type="text" placeholder="输入昵称" />
+      <button id="startBtn">开始匹配</button>
+    </div>
+
+    <div id="gameBox" class="panel hidden">
+      <div id="status"></div>
+      <div id="turnInfo"></div>
+      <div id="deckInfo"></div>
+
+      <h3>你的手牌</h3>
+      <div id="hand" class="hand"></div>
+
+      <div class="actions">
+        <button id="drawBtn">抽牌</button>
+      </div>
+
+      <h3>聊天</h3>
+      <div id="chatBox" class="chat-box"></div>
+      <div class="chat-input">
+        <input id="chatInput" type="text" placeholder="输入聊天内容" />
+        <button id="sendChatBtn">发送</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="client.js"></script>
+</body>
+</html>
