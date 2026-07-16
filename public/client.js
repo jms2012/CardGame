@@ -2,6 +2,10 @@
 const SUPABASE_URL = "https://card-game.474804665.workers.dev";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB3anpzdHlwaWp5c3BrZHJjcnhjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQxMDQ0MTQsImV4cCI6MjA5OTY4MDQxNH0.UZ4C1ehOSZv6QWO-Cj6EDV8-viCc2KJX5KSwOGJeE0E";
 
+// ===================== 配置项：替换成你自己的 =====================
+const SUPABASE_URL = "https://你的项目.supabase.co";
+const SUPABASE_ANON_KEY = "你的anon公钥";
+
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // 生成本地玩家唯一ID
@@ -17,6 +21,8 @@ let myName = "";
 let realtimeChannel = null;
 let currentRoomData = null;
 let currentPlayersData = [];
+let lastTurn = ""; // 记录上一回合，用于检测回合切换
+let hasDrawnThisTurn = false; // 本回合是否已抽牌，防止重复抽
 
 // DOM元素
 const loginBox = document.getElementById("loginBox");
@@ -32,7 +38,10 @@ const chatBox = document.getElementById("chatBox");
 const chatInput = document.getElementById("chatInput");
 const sendChatBtn = document.getElementById("sendChatBtn");
 
-// ========== 入口：开始匹配（增加重试机制） ==========
+// 隐藏手动抽牌按钮（已改为自动抽牌）
+if (drawBtn) drawBtn.style.display = "none";
+
+// ========== 入口：开始匹配 ==========
 startBtn.onclick = () => {
   const name = nameInput.value.trim();
   if (!name) return alert("请输入昵称");
@@ -43,14 +52,13 @@ startBtn.onclick = () => {
   startMatch(0);
 };
 
-// 匹配逻辑，最多重试3次
+// 匹配逻辑，带重试机制
 async function startMatch(retryCount) {
   if (retryCount > 3) {
     addSystemMessage("匹配失败，请刷新页面重试");
     return;
   }
 
-  // 查询等待中的房间
   const { data: waitingRooms, error: queryError } = await sb
     .from("rooms")
     .select("id")
@@ -68,11 +76,9 @@ async function startMatch(retryCount) {
     roomId = waitingRooms[0].id;
     const joinSuccess = await joinRoom(roomId);
     if (!joinSuccess) {
-      // 加入失败，重试匹配下一个房间
       setTimeout(() => startMatch(retryCount + 1), 300);
       return;
     }
-    // 加入成功，更新房间状态
     await sb.from("rooms").update({ status: "playing" }).eq("id", roomId);
   } else {
     roomId = await createRoom();
@@ -127,7 +133,7 @@ async function createRoom() {
 
 // 加入房间（兼容重复加入）
 async function joinRoom(roomId) {
-  // 先检查是否已经在房间里
+  // 先检查是否已在房间内
   const { data: existPlayer } = await sb
     .from("room_players")
     .select("*")
@@ -135,7 +141,6 @@ async function joinRoom(roomId) {
     .eq("player_id", myPlayerId)
     .maybeSingle();
 
-  // 已经在房间里，直接返回成功
   if (existPlayer) return true;
 
   const { data: room, error: roomError } = await sb
@@ -169,9 +174,10 @@ async function joinRoom(roomId) {
   return true;
 }
 
-// 订阅实时数据
+// 订阅实时数据（修复同步核心：改用player_id匹配玩家）
 function subscribeRoom(roomId) {
   realtimeChannel = sb.channel("room-" + roomId)
+    // 监听玩家数据变化（手牌、加入）
     .on("postgres_changes", {
       event: "*",
       schema: "public",
@@ -179,7 +185,8 @@ function subscribeRoom(roomId) {
       filter: `room_id=eq.${roomId}`
     }, (payload) => {
       const updatedPlayer = payload.new;
-      const idx = currentPlayersData.findIndex(p => p.id === updatedPlayer.id);
+      // 改用player_id匹配，彻底解决同步错位
+      const idx = currentPlayersData.findIndex(p => p.player_id === updatedPlayer.player_id);
       if (idx > -1) {
         currentPlayersData[idx] = updatedPlayer;
       } else {
@@ -187,15 +194,28 @@ function subscribeRoom(roomId) {
       }
       renderGameUI();
     })
+    // 监听房间状态变化（回合、牌库、状态）
     .on("postgres_changes", {
       event: "*",
       schema: "public",
       table: "rooms",
       filter: `id=eq.${roomId}`
     }, (payload) => {
-      currentRoomData = payload.new;
+      const newRoomData = payload.new;
+      currentRoomData = newRoomData;
+
+      // 检测回合切换：新回合是自己 → 自动抽牌
+      if (newRoomData.turn !== lastTurn && newRoomData.status === "playing") {
+        lastTurn = newRoomData.turn;
+        hasDrawnThisTurn = false; // 新回合重置抽牌标记
+        if (newRoomData.turn === myPlayerId) {
+          autoDrawCard(); // 轮到自己，自动抽牌
+        }
+      }
+
       renderGameUI();
     })
+    // 监听聊天消息
     .on("postgres_changes", {
       event: "INSERT",
       schema: "public",
@@ -208,7 +228,7 @@ function subscribeRoom(roomId) {
     .subscribe();
 }
 
-// 初始化房间数据
+// 初始化房间全量数据（仅进入时调用一次）
 async function initRoomData() {
   if (!currentRoomId) return;
 
@@ -225,10 +245,45 @@ async function initRoomData() {
 
   currentRoomData = room;
   currentPlayersData = players;
+  lastTurn = room.turn; // 初始化回合标记
+  hasDrawnThisTurn = false;
   renderGameUI();
 }
 
-// 纯本地渲染
+// 自动抽牌（回合开始触发）
+async function autoDrawCard() {
+  if (!currentRoomId || !currentRoomData) return;
+  if (hasDrawnThisTurn) return; // 防止重复抽牌
+  if (currentRoomData.deck.length === 0) {
+    addSystemMessage("牌库已空，无法抽牌");
+    return;
+  }
+
+  hasDrawnThisTurn = true;
+
+  // 乐观更新：本地立刻刷新界面
+  const newDeck = [...currentRoomData.deck];
+  const card = newDeck.pop();
+  currentRoomData.deck = newDeck;
+
+  const me = currentPlayersData.find(p => p.player_id === myPlayerId);
+  const newHand = [...me.hand, card];
+  me.hand = newHand;
+
+  renderGameUI();
+  addSystemMessage(`回合开始，你抽到了 ${card}`);
+
+  // 后台静默同步数据库
+  await sb
+    .from("room_players")
+    .update({ hand: newHand })
+    .eq("room_id", currentRoomId)
+    .eq("player_id", myPlayerId);
+
+  await sb.from("rooms").update({ deck: newDeck }).eq("id", currentRoomId);
+}
+
+// 纯本地渲染，毫秒级响应
 function renderGameUI() {
   if (!currentRoomData || !currentPlayersData.length) return;
 
@@ -240,6 +295,7 @@ function renderGameUI() {
   turnInfoEl.textContent = `当前回合：${turnPlayer ? turnPlayer.name : "等待中"}`;
   deckInfoEl.textContent = `牌库剩余：${currentRoomData.deck.length}`;
 
+  // 渲染手牌
   handEl.innerHTML = "";
   if (me) {
     me.hand.forEach(card => {
@@ -252,49 +308,23 @@ function renderGameUI() {
     });
   }
 
+  // 游戏开始提示
   if (currentRoomData.status === "playing" && opponent && !statusEl.dataset.started) {
     addSystemMessage("对手已加入，游戏开始！");
     statusEl.dataset.started = "1";
   }
 }
 
-// 抽牌（乐观更新）
-drawBtn.onclick = async () => {
-  if (!currentRoomId || currentRoomData.turn !== myPlayerId) {
-    return addSystemMessage("还没轮到你");
-  }
-  if (currentRoomData.deck.length === 0) {
-    return addSystemMessage("牌库已经没有牌了");
-  }
-
-  const newDeck = [...currentRoomData.deck];
-  const card = newDeck.pop();
-  currentRoomData.deck = newDeck;
-
-  const me = currentPlayersData.find(p => p.player_id === myPlayerId);
-  const newHand = [...me.hand, card];
-  me.hand = newHand;
-
-  renderGameUI();
-  addSystemMessage("你抽了一张牌");
-
-  await sb
-    .from("room_players")
-    .update({ hand: newHand })
-    .eq("room_id", currentRoomId)
-    .eq("player_id", myPlayerId);
-
-  await sb.from("rooms").update({ deck: newDeck }).eq("id", currentRoomId);
-};
-
-// 出牌（乐观更新）
+// 出牌（乐观更新 + 切换回合）
 async function playCard(card) {
   if (currentRoomData.turn !== myPlayerId) return;
 
+  // 本地立刻更新界面
   const me = currentPlayersData.find(p => p.player_id === myPlayerId);
   const newHand = me.hand.filter(c => c !== card);
   me.hand = newHand;
 
+  // 切换回合给对手
   const opponent = currentPlayersData.find(p => p.player_id !== myPlayerId);
   if (opponent) {
     currentRoomData.turn = opponent.player_id;
@@ -303,6 +333,7 @@ async function playCard(card) {
   renderGameUI();
   addSystemMessage(`你打出了 ${card}，轮到对手`);
 
+  // 后台同步数据库
   await sb
     .from("room_players")
     .update({ hand: newHand })
@@ -317,7 +348,7 @@ async function playCard(card) {
   }
 }
 
-// 聊天逻辑
+// ========== 聊天逻辑 ==========
 sendChatBtn.onclick = sendChat;
 chatInput.addEventListener("keydown", e => {
   if (e.key === "Enter") sendChat();
