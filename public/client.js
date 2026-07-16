@@ -2,10 +2,6 @@
 const SUPABASE_URL = "https://card-game.474804665.workers.dev";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB3anpzdHlwaWp5c3BrZHJjcnhjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQxMDQ0MTQsImV4cCI6MjA5OTY4MDQxNH0.UZ4C1ehOSZv6QWO-Cj6EDV8-viCc2KJX5KSwOGJeE0E";
 
-// ===================== 配置项：替换成你自己的 =====================
-const SUPABASE_URL = "https://你的项目.supabase.co";
-const SUPABASE_ANON_KEY = "你的anon公钥";
-
 const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // 生成本地玩家唯一ID
