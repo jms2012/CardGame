@@ -36,25 +36,22 @@ window.addEventListener("DOMContentLoaded", () => {
   const chatInput = document.getElementById("chatInput");
   const sendChatBtn = document.getElementById("sendChatBtn");
 
-  // ========== 【核心修复1：彻底清理旧状态，杜绝数据混杂】 ==========
+  // ========== 状态重置工具 ==========
   function resetAllState() {
-    // 清理旧订阅
     if (realtimeChannel) {
       sb.removeChannel(realtimeChannel);
       realtimeChannel = null;
     }
-    // 重置所有全局状态
     currentRoomId = null;
     currentRoomData = null;
     currentPlayersData = [];
     lastTurn = "";
     hasDrawnThisTurn = false;
-    // 清空界面
     chatBox.innerHTML = "";
     handEl.innerHTML = "";
   }
 
-  // ========== 工具函数 ==========
+  // ========== 消息工具函数 ==========
   async function sendSystemMessage(content) {
     if (!currentRoomId) return;
     await sb.from("chats").insert({
@@ -80,7 +77,7 @@ window.addEventListener("DOMContentLoaded", () => {
     chatBox.scrollTop = chatBox.scrollHeight;
   }
 
-  // ========== 纯本地渲染界面 ==========
+  // ========== 界面渲染 ==========
   function renderGameUI() {
     if (!currentRoomData || !currentPlayersData.length) return;
 
@@ -92,7 +89,8 @@ window.addEventListener("DOMContentLoaded", () => {
     turnInfoEl.textContent = `当前回合：${turnPlayer ? turnPlayer.name : "等待中"}`;
     deckInfoEl.textContent = `牌库剩余：${currentRoomData.deck.length}`;
 
-    endTurnBtn.disabled = currentRoomData.turn !== myPlayerId || !opponent;
+    // 修复结束回合按钮禁用逻辑：只有自己回合+有对手才能点击
+    endTurnBtn.disabled = !(currentRoomData.turn === myPlayerId && opponent);
 
     // 渲染手牌
     handEl.innerHTML = "";
@@ -124,7 +122,6 @@ window.addEventListener("DOMContentLoaded", () => {
 
     hasDrawnThisTurn = true;
 
-    // 乐观更新本地状态
     const newDeck = [...currentRoomData.deck];
     const card = newDeck.pop();
     currentRoomData.deck = newDeck;
@@ -135,7 +132,6 @@ window.addEventListener("DOMContentLoaded", () => {
 
     renderGameUI();
 
-    // 后台同步数据库（双条件校验：房间ID+玩家ID，防止串改）
     try {
       await Promise.all([
         sb.from("room_players")
@@ -148,20 +144,21 @@ window.addEventListener("DOMContentLoaded", () => {
     } catch (e) {
       console.error("抽牌同步失败：", e);
       addLocalTip("抽牌同步失败，正在刷新数据");
-      initRoomData(); // 失败自动拉取最新数据修正
+      initRoomData();
     }
   }
 
   // ========== 出牌逻辑 ==========
   async function playCard(card) {
-    if (currentRoomData.turn !== myPlayerId) return;
+    if (!currentRoomData || currentRoomData.turn !== myPlayerId) return;
 
     const me = currentPlayersData.find(p => p.player_id === myPlayerId);
+    if (!me) return;
+
     const newHand = me.hand.filter(c => c !== card);
     me.hand = newHand;
     renderGameUI();
 
-    // 双条件校验更新，防止跨房间修改
     try {
       await sb.from("room_players")
         .update({ hand: newHand })
@@ -170,13 +167,18 @@ window.addEventListener("DOMContentLoaded", () => {
       sendSystemMessage(`${myName} 打出了 ${card}`);
     } catch (e) {
       console.error("出牌同步失败：", e);
-      addLocalTip("出牌同步失败，正在刷新数据");
+      addLocalTip("出牌同步失败，请重试");
       initRoomData();
     }
   }
 
-  // ========== 结束回合 ==========
+  // ========== 【修复】结束回合：加固逻辑+双端消息提示 ==========
   async function endTurn() {
+    // 边界校验
+    if (!currentRoomData || !currentRoomId) {
+      addLocalTip("房间数据未加载，请稍候重试");
+      return;
+    }
     if (currentRoomData.turn !== myPlayerId) {
       addLocalTip("还没轮到你，无法结束回合");
       return;
@@ -184,32 +186,69 @@ window.addEventListener("DOMContentLoaded", () => {
 
     const opponent = currentPlayersData.find(p => p.player_id !== myPlayerId);
     if (!opponent) {
-      addLocalTip("对手未加入，无法结束回合");
+      addLocalTip("对手尚未加入，无法结束回合");
       return;
     }
 
-    // 乐观更新本地回合
+    // 乐观更新本地状态
+    const oldTurn = currentRoomData.turn;
     currentRoomData.turn = opponent.player_id;
     renderGameUI();
     addLocalTip("已结束回合，等待对手操作");
 
-    // 按房间ID精准更新
+    // 同步到数据库+发送双端系统消息
     try {
       await sb.from("rooms")
         .update({ turn: opponent.player_id })
         .eq("id", currentRoomId);
-      sendSystemMessage(`${myName} 结束了回合`);
+      // 双端可见的结束回合提示
+      sendSystemMessage(`${myName} 结束了回合，轮到 ${opponent.name}`);
     } catch (e) {
       console.error("结束回合失败：", e);
-      addLocalTip("结束回合失败，请重试");
-      currentRoomData.turn = myPlayerId;
+      addLocalTip("结束回合失败，正在恢复状态");
+      // 失败回滚本地状态
+      currentRoomData.turn = oldTurn;
       renderGameUI();
     }
   }
 
-  // ========== 【核心修复2：实时订阅严格隔离，防串数据】 ==========
+  // ========== 【新增】玩家离开自动清理房间 ==========
+  async function cleanupRoomOnLeave() {
+    if (!currentRoomId) return;
+
+    try {
+      // 1. 先删除自己的玩家记录
+      await sb.from("room_players")
+        .delete()
+        .eq("room_id", currentRoomId)
+        .eq("player_id", myPlayerId);
+
+      // 2. 查询房间剩余玩家数
+      const { data: remainingPlayers } = await sb
+        .from("room_players")
+        .select("player_id")
+        .eq("room_id", currentRoomId);
+
+      // 3. 没有玩家了，删除房间（外键级联自动删除玩家、聊天记录）
+      if (!remainingPlayers || remainingPlayers.length === 0) {
+        await sb.from("rooms")
+          .delete()
+          .eq("id", currentRoomId);
+      } else {
+        // 还有玩家在线，发送离开提示
+        await sb.from("chats").insert({
+          room_id: currentRoomId,
+          name: "系统",
+          message: `${myName} 离开了房间`
+        });
+      }
+    } catch (e) {
+      console.warn("房间清理失败：", e);
+    }
+  }
+
+  // ========== 实时订阅 ==========
   function subscribeRoom(roomId) {
-    // 先彻底清理旧订阅，防止多频道并存导致数据混杂
     if (realtimeChannel) {
       sb.removeChannel(realtimeChannel);
       realtimeChannel = null;
@@ -217,35 +256,49 @@ window.addEventListener("DOMContentLoaded", () => {
 
     realtimeChannel = sb.channel("room-" + roomId);
 
-    // 监听玩家数据变化 + 房间ID二次校验
+    // 监听玩家数据变化（加入/离开/手牌更新）
     realtimeChannel.on("postgres_changes", {
       event: "*",
       schema: "public",
       table: "room_players",
       filter: `room_id=eq.${roomId}`
     }, (payload) => {
-      // 【关键校验】数据不属于当前房间直接丢弃
       if (payload.new.room_id !== currentRoomId) return;
 
-      const updatedPlayer = payload.new;
-      const idx = currentPlayersData.findIndex(p => p.player_id === updatedPlayer.player_id);
-      if (idx > -1) {
-        currentPlayersData[idx] = updatedPlayer;
+      // 玩家离开事件（DELETE）
+      if (payload.eventType === "DELETE") {
+        const leftPlayerId = payload.old.player_id;
+        currentPlayersData = currentPlayersData.filter(p => p.player_id !== leftPlayerId);
       } else {
-        currentPlayersData.push(updatedPlayer);
+        // 玩家加入/更新
+        const updatedPlayer = payload.new;
+        const idx = currentPlayersData.findIndex(p => p.player_id === updatedPlayer.player_id);
+        if (idx > -1) {
+          currentPlayersData[idx] = updatedPlayer;
+        } else {
+          currentPlayersData.push(updatedPlayer);
+        }
       }
       renderGameUI();
     });
 
-    // 监听房间状态变化 + 房间ID二次校验
+    // 监听房间状态变化
     realtimeChannel.on("postgres_changes", {
       event: "*",
       schema: "public",
       table: "rooms",
       filter: `id=eq.${roomId}`
     }, (payload) => {
-      // 【关键校验】数据不属于当前房间直接丢弃
       if (payload.new.id !== currentRoomId) return;
+
+      // 房间被删除，重置状态
+      if (payload.eventType === "DELETE") {
+        addLocalTip("房间已解散");
+        resetAllState();
+        loginBox.classList.remove("hidden");
+        gameBox.classList.add("hidden");
+        return;
+      }
 
       const newRoomData = payload.new;
       currentRoomData = newRoomData;
@@ -266,7 +319,7 @@ window.addEventListener("DOMContentLoaded", () => {
       renderGameUI();
     });
 
-    // 监听聊天+系统消息 + 房间ID二次校验
+    // 监听聊天消息
     realtimeChannel.on("postgres_changes", {
       event: "INSERT",
       schema: "public",
@@ -289,7 +342,7 @@ window.addEventListener("DOMContentLoaded", () => {
     });
   }
 
-  // ========== 初始化房间全量数据（只拉当前房间） ==========
+  // ========== 初始化房间数据 ==========
   async function initRoomData() {
     if (!currentRoomId) return;
 
@@ -311,7 +364,7 @@ window.addEventListener("DOMContentLoaded", () => {
     renderGameUI();
   }
 
-  // 加载当前房间历史聊天
+  // 加载历史聊天
   async function loadHistoryChat() {
     if (!currentRoomId) return;
     const { data: chats } = await sb
@@ -383,7 +436,6 @@ window.addEventListener("DOMContentLoaded", () => {
 
   // ========== 加入房间 ==========
   async function joinRoom(roomId) {
-    // 先校验房间状态和人数
     const [{ data: room }, { data: players }] = await Promise.all([
       sb.from("rooms").select("deck, turn, status").eq("id", roomId).single(),
       sb.from("room_players").select("player_id").eq("room_id", roomId)
@@ -393,7 +445,6 @@ window.addEventListener("DOMContentLoaded", () => {
       return false;
     }
 
-    // 自己已在房间内直接返回成功
     if (players.some(p => p.player_id === myPlayerId)) {
       return true;
     }
@@ -418,12 +469,11 @@ window.addEventListener("DOMContentLoaded", () => {
     return true;
   }
 
-  // ========== 【核心修复3：匹配前先查已有房间，防止重复开房】 ==========
+  // ========== 匹配逻辑 ==========
   async function startMatch() {
-    // 第一步：先彻底重置所有旧状态，防止上一局数据残留
     resetAllState();
 
-    // 第二步：先查自己是否已经在某个房间里，有就直接进入，不重复创建
+    // 检查是否已有进行中的房间
     const { data: myRooms } = await sb
       .from("room_players")
       .select("room_id, rooms!inner(status)")
@@ -438,7 +488,6 @@ window.addEventListener("DOMContentLoaded", () => {
       return;
     }
 
-    // 第三步：正常匹配逻辑
     const { data: waitingRooms, error: queryError } = await sb
       .from("rooms")
       .select("id")
@@ -465,7 +514,6 @@ window.addEventListener("DOMContentLoaded", () => {
       }
     }
 
-    // 无可用房间则创建新房间
     createAndEnterRoom();
   }
 
@@ -506,8 +554,8 @@ window.addEventListener("DOMContentLoaded", () => {
     if (e.key === "Enter") sendChat();
   });
 
-  // 页面关闭清理订阅
+  // ========== 页面关闭时清理房间 ==========
   window.addEventListener("beforeunload", () => {
-    if (realtimeChannel) sb.removeChannel(realtimeChannel);
+    cleanupRoomOnLeave();
   });
 });
