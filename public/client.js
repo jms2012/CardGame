@@ -20,7 +20,7 @@ let currentPlayersData = [];
 let lastTurn = "";
 let hasDrawnThisTurn = false;
 
-// ========== 页面加载完成后再执行所有DOM操作（修复按钮点击没反应核心） ==========
+// ========== 页面加载完成后执行 ==========
 window.addEventListener("DOMContentLoaded", () => {
   // DOM元素统一获取
   const loginBox = document.getElementById("loginBox");
@@ -35,6 +35,24 @@ window.addEventListener("DOMContentLoaded", () => {
   const chatBox = document.getElementById("chatBox");
   const chatInput = document.getElementById("chatInput");
   const sendChatBtn = document.getElementById("sendChatBtn");
+
+  // ========== 【核心修复1：彻底清理旧状态，杜绝数据混杂】 ==========
+  function resetAllState() {
+    // 清理旧订阅
+    if (realtimeChannel) {
+      sb.removeChannel(realtimeChannel);
+      realtimeChannel = null;
+    }
+    // 重置所有全局状态
+    currentRoomId = null;
+    currentRoomData = null;
+    currentPlayersData = [];
+    lastTurn = "";
+    hasDrawnThisTurn = false;
+    // 清空界面
+    chatBox.innerHTML = "";
+    handEl.innerHTML = "";
+  }
 
   // ========== 工具函数 ==========
   async function sendSystemMessage(content) {
@@ -74,7 +92,6 @@ window.addEventListener("DOMContentLoaded", () => {
     turnInfoEl.textContent = `当前回合：${turnPlayer ? turnPlayer.name : "等待中"}`;
     deckInfoEl.textContent = `牌库剩余：${currentRoomData.deck.length}`;
 
-    // 结束回合按钮状态：只有自己回合且对手存在才能点
     endTurnBtn.disabled = currentRoomData.turn !== myPlayerId || !opponent;
 
     // 渲染手牌
@@ -95,7 +112,7 @@ window.addEventListener("DOMContentLoaded", () => {
     }
   }
 
-  // ========== 自动抽牌（加固版，避免漏抽） ==========
+  // ========== 自动抽牌 ==========
   async function autoDrawCard() {
     if (!currentRoomId || !currentRoomData) return;
     if (hasDrawnThisTurn) return;
@@ -118,7 +135,7 @@ window.addEventListener("DOMContentLoaded", () => {
 
     renderGameUI();
 
-    // 后台同步数据库
+    // 后台同步数据库（双条件校验：房间ID+玩家ID，防止串改）
     try {
       await Promise.all([
         sb.from("room_players")
@@ -130,7 +147,8 @@ window.addEventListener("DOMContentLoaded", () => {
       sendSystemMessage(`${myName} 抽到了一张牌`);
     } catch (e) {
       console.error("抽牌同步失败：", e);
-      addLocalTip("抽牌同步失败，请刷新页面");
+      addLocalTip("抽牌同步失败，正在刷新数据");
+      initRoomData(); // 失败自动拉取最新数据修正
     }
   }
 
@@ -143,6 +161,7 @@ window.addEventListener("DOMContentLoaded", () => {
     me.hand = newHand;
     renderGameUI();
 
+    // 双条件校验更新，防止跨房间修改
     try {
       await sb.from("room_players")
         .update({ hand: newHand })
@@ -151,11 +170,12 @@ window.addEventListener("DOMContentLoaded", () => {
       sendSystemMessage(`${myName} 打出了 ${card}`);
     } catch (e) {
       console.error("出牌同步失败：", e);
-      addLocalTip("出牌同步失败，请重试");
+      addLocalTip("出牌同步失败，正在刷新数据");
+      initRoomData();
     }
   }
 
-  // ========== 结束回合（加固版，有明确反馈） ==========
+  // ========== 结束回合 ==========
   async function endTurn() {
     if (currentRoomData.turn !== myPlayerId) {
       addLocalTip("还没轮到你，无法结束回合");
@@ -173,7 +193,7 @@ window.addEventListener("DOMContentLoaded", () => {
     renderGameUI();
     addLocalTip("已结束回合，等待对手操作");
 
-    // 后台同步
+    // 按房间ID精准更新
     try {
       await sb.from("rooms")
         .update({ turn: opponent.player_id })
@@ -182,28 +202,31 @@ window.addEventListener("DOMContentLoaded", () => {
     } catch (e) {
       console.error("结束回合失败：", e);
       addLocalTip("结束回合失败，请重试");
-      // 失败回滚本地状态
       currentRoomData.turn = myPlayerId;
       renderGameUI();
     }
   }
 
-  // ========== 订阅实时数据（加固版，确认订阅成功） ==========
+  // ========== 【核心修复2：实时订阅严格隔离，防串数据】 ==========
   function subscribeRoom(roomId) {
-    // 先清理旧订阅
+    // 先彻底清理旧订阅，防止多频道并存导致数据混杂
     if (realtimeChannel) {
       sb.removeChannel(realtimeChannel);
+      realtimeChannel = null;
     }
 
     realtimeChannel = sb.channel("room-" + roomId);
 
-    // 监听玩家数据变化
+    // 监听玩家数据变化 + 房间ID二次校验
     realtimeChannel.on("postgres_changes", {
       event: "*",
       schema: "public",
       table: "room_players",
       filter: `room_id=eq.${roomId}`
     }, (payload) => {
+      // 【关键校验】数据不属于当前房间直接丢弃
+      if (payload.new.room_id !== currentRoomId) return;
+
       const updatedPlayer = payload.new;
       const idx = currentPlayersData.findIndex(p => p.player_id === updatedPlayer.player_id);
       if (idx > -1) {
@@ -214,25 +237,26 @@ window.addEventListener("DOMContentLoaded", () => {
       renderGameUI();
     });
 
-    // 监听房间状态变化（修复抽牌核心：加固回合切换判定）
+    // 监听房间状态变化 + 房间ID二次校验
     realtimeChannel.on("postgres_changes", {
       event: "*",
       schema: "public",
       table: "rooms",
       filter: `id=eq.${roomId}`
     }, (payload) => {
+      // 【关键校验】数据不属于当前房间直接丢弃
+      if (payload.new.id !== currentRoomId) return;
+
       const newRoomData = payload.new;
       currentRoomData = newRoomData;
 
-      // 回合切换判定：严格对比新旧回合，且新回合是自己才抽牌
+      // 回合切换判定
       if (newRoomData.turn !== lastTurn && newRoomData.status === "playing") {
         const isMyNewTurn = newRoomData.turn === myPlayerId;
         lastTurn = newRoomData.turn;
         hasDrawnThisTurn = false;
 
-        // 只有轮到自己且不是开局先手，才自动抽牌
         if (isMyNewTurn) {
-          // 延迟执行，确保玩家数据已同步
           setTimeout(() => {
             autoDrawCard();
           }, 100);
@@ -242,18 +266,19 @@ window.addEventListener("DOMContentLoaded", () => {
       renderGameUI();
     });
 
-    // 监听聊天+系统消息
+    // 监听聊天+系统消息 + 房间ID二次校验
     realtimeChannel.on("postgres_changes", {
       event: "INSERT",
       schema: "public",
       table: "chats",
       filter: `room_id=eq.${roomId}`
     }, (payload) => {
+      if (payload.new.room_id !== currentRoomId) return;
       const msg = payload.new;
       addChatMessage(msg.name, msg.message);
     });
 
-    // 订阅状态回调，确认是否成功
+    // 订阅状态回调
     realtimeChannel.subscribe((status) => {
       console.log("实时订阅状态：", status);
       if (status === "SUBSCRIBED") {
@@ -264,7 +289,7 @@ window.addEventListener("DOMContentLoaded", () => {
     });
   }
 
-  // ========== 初始化房间全量数据 ==========
+  // ========== 初始化房间全量数据（只拉当前房间） ==========
   async function initRoomData() {
     if (!currentRoomId) return;
 
@@ -282,12 +307,11 @@ window.addEventListener("DOMContentLoaded", () => {
     currentRoomData = room;
     currentPlayersData = players;
     lastTurn = room.turn;
-    // 初始化：如果当前就是自己回合，标记为已抽牌（开局初始手牌已发）
     hasDrawnThisTurn = room.status === "playing" && room.turn === myPlayerId;
     renderGameUI();
   }
 
-  // 加载历史聊天记录
+  // 加载当前房间历史聊天
   async function loadHistoryChat() {
     if (!currentRoomId) return;
     const { data: chats } = await sb
@@ -297,8 +321,8 @@ window.addEventListener("DOMContentLoaded", () => {
       .order("created_at", { ascending: true })
       .limit(100);
 
+    chatBox.innerHTML = "";
     if (chats && chats.length > 0) {
-      chatBox.innerHTML = "";
       chats.forEach(msg => addChatMessage(msg.name, msg.message));
     }
   }
@@ -359,6 +383,7 @@ window.addEventListener("DOMContentLoaded", () => {
 
   // ========== 加入房间 ==========
   async function joinRoom(roomId) {
+    // 先校验房间状态和人数
     const [{ data: room }, { data: players }] = await Promise.all([
       sb.from("rooms").select("deck, turn, status").eq("id", roomId).single(),
       sb.from("room_players").select("player_id").eq("room_id", roomId)
@@ -368,6 +393,7 @@ window.addEventListener("DOMContentLoaded", () => {
       return false;
     }
 
+    // 自己已在房间内直接返回成功
     if (players.some(p => p.player_id === myPlayerId)) {
       return true;
     }
@@ -392,8 +418,27 @@ window.addEventListener("DOMContentLoaded", () => {
     return true;
   }
 
-  // ========== 匹配逻辑 ==========
+  // ========== 【核心修复3：匹配前先查已有房间，防止重复开房】 ==========
   async function startMatch() {
+    // 第一步：先彻底重置所有旧状态，防止上一局数据残留
+    resetAllState();
+
+    // 第二步：先查自己是否已经在某个房间里，有就直接进入，不重复创建
+    const { data: myRooms } = await sb
+      .from("room_players")
+      .select("room_id, rooms!inner(status)")
+      .eq("player_id", myPlayerId)
+      .in("rooms.status", ["waiting", "playing"]);
+
+    if (myRooms && myRooms.length > 0) {
+      const existRoomId = myRooms[0].room_id;
+      currentRoomId = existRoomId;
+      initRoomAndSubscribe();
+      addLocalTip("已回到之前的房间");
+      return;
+    }
+
+    // 第三步：正常匹配逻辑
     const { data: waitingRooms, error: queryError } = await sb
       .from("rooms")
       .select("id")
@@ -420,6 +465,7 @@ window.addEventListener("DOMContentLoaded", () => {
       }
     }
 
+    // 无可用房间则创建新房间
     createAndEnterRoom();
   }
 
