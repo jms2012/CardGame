@@ -3,7 +3,9 @@
   "version": "1.0.0",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "deploy": "wrangler deploy",
+    "preview": "wrangler dev"
   },
   "description": "no description :)",
   "repository": {
@@ -20,5 +22,8 @@
   "dependencies": {
     "express": "^5.2.1",
     "socket.io": "^4.8.3"
+  },
+  "devDependencies": {
+    "wrangler": "^4.111.0"
   }
 }
