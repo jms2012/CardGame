@@ -2,8 +2,8 @@
 const SUPABASE_URL = "https://pwjzstypijyspkdrcrxc.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InB3anpzdHlwaWp5c3BrZHJjcnhjIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODQxMDQ0MTQsImV4cCI6MjA5OTY4MDQxNH0.UZ4C1ehOSZv6QWO-Cj6EDV8-viCc2KJX5KSwOGJeE0E";
 
-// 初始化 Supabase 客户端
-const supabase = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+// 变量名改为 sb，避免和全局 supabase 对象重名
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // 生成本地玩家唯一ID（刷新不丢失，用于断线重连）
 let myPlayerId = localStorage.getItem("card_game_pid");
@@ -16,7 +16,7 @@ let currentRoomId = null;
 let myName = "";
 let realtimeChannel = null;
 
-// DOM 元素（和原代码完全一致，兼容你的页面结构）
+// DOM 元素
 const loginBox = document.getElementById("loginBox");
 const gameBox = document.getElementById("gameBox");
 const nameInput = document.getElementById("nameInput");
@@ -44,7 +44,7 @@ startBtn.onclick = () => {
 // 自动匹配：找等待中的房间，没有就创建
 async function startMatch() {
   // 1. 查询等待中的房间
-  const { data: waitingRooms } = await supabase
+  const { data: waitingRooms } = await sb
     .from("rooms")
     .select("id")
     .eq("status", "waiting")
@@ -55,8 +55,8 @@ async function startMatch() {
     // 加入已有房间
     roomId = waitingRooms[0].id;
     await joinRoom(roomId);
-    // 更新房间状态为游戏中，设置房主为先手
-    await supabase
+    // 更新房间状态为游戏中
+    await sb
       .from("rooms")
       .update({ status: "playing" })
       .eq("id", roomId);
@@ -81,7 +81,7 @@ async function createRoom() {
   }
 
   // 创建房间
-  const { data: room } = await supabase
+  const { data: room } = await sb
     .from("rooms")
     .insert({ deck, status: "waiting", turn: myPlayerId })
     .select("id")
@@ -89,7 +89,7 @@ async function createRoom() {
 
   // 加入房间并发初始手牌
   const myHand = deck.splice(0, 3);
-  await supabase.from("room_players").insert({
+  await sb.from("room_players").insert({
     room_id: room.id,
     player_id: myPlayerId,
     name: myName,
@@ -97,13 +97,13 @@ async function createRoom() {
   });
 
   // 更新剩余牌库
-  await supabase.from("rooms").update({ deck }).eq("id", room.id);
+  await sb.from("rooms").update({ deck }).eq("id", room.id);
   return room.id;
 }
 
 // 加入已有房间
 async function joinRoom(roomId) {
-  const { data: room } = await supabase
+  const { data: room } = await sb
     .from("rooms")
     .select("deck, turn")
     .eq("id", roomId)
@@ -113,7 +113,7 @@ async function joinRoom(roomId) {
   const deck = room.deck;
   const myHand = deck.splice(0, 3);
 
-  await supabase.from("room_players").insert({
+  await sb.from("room_players").insert({
     room_id: roomId,
     player_id: myPlayerId,
     name: myName,
@@ -121,12 +121,12 @@ async function joinRoom(roomId) {
   });
 
   // 更新剩余牌库
-  await supabase.from("rooms").update({ deck }).eq("id", roomId);
+  await sb.from("rooms").update({ deck }).eq("id", roomId);
 }
 
 // 订阅房间实时数据变化
 function subscribeRoom(roomId) {
-  realtimeChannel = supabase.channel("room-" + roomId)
+  realtimeChannel = sb.channel("room-" + roomId)
     // 监听玩家数据变化（出牌、抽牌）
     .on("postgres_changes", {
       event: "*",
@@ -159,14 +159,14 @@ async function refreshGameUI() {
   if (!currentRoomId) return;
 
   // 获取房间信息
-  const { data: room } = await supabase
+  const { data: room } = await sb
     .from("rooms")
     .select("*")
     .eq("id", currentRoomId)
     .single();
 
   // 获取所有玩家
-  const { data: players } = await supabase
+  const { data: players } = await sb
     .from("room_players")
     .select("*")
     .eq("room_id", currentRoomId);
@@ -204,7 +204,7 @@ async function refreshGameUI() {
 // 抽牌
 drawBtn.onclick = async () => {
   if (!currentRoomId) return;
-  const { data: room } = await supabase
+  const { data: room } = await sb
     .from("rooms")
     .select("deck, turn")
     .eq("id", currentRoomId)
@@ -218,7 +218,7 @@ drawBtn.onclick = async () => {
   const card = newDeck.pop();
 
   // 更新自己的手牌
-  const { data: me } = await supabase
+  const { data: me } = await sb
     .from("room_players")
     .select("hand")
     .eq("room_id", currentRoomId)
@@ -226,20 +226,20 @@ drawBtn.onclick = async () => {
     .single();
 
   const newHand = [...me.hand, card];
-  await supabase
+  await sb
     .from("room_players")
     .update({ hand: newHand })
     .eq("room_id", currentRoomId)
     .eq("player_id", myPlayerId);
 
   // 更新牌库
-  await supabase.from("rooms").update({ deck: newDeck }).eq("id", currentRoomId);
+  await sb.from("rooms").update({ deck: newDeck }).eq("id", currentRoomId);
   addSystemMessage("你抽了一张牌");
 };
 
 // 出牌
 async function playCard(card) {
-  const { data: room } = await supabase
+  const { data: room } = await sb
     .from("rooms")
     .select("turn")
     .eq("id", currentRoomId)
@@ -247,7 +247,7 @@ async function playCard(card) {
   if (room.turn !== myPlayerId) return;
 
   // 移除打出的牌
-  const { data: me } = await supabase
+  const { data: me } = await sb
     .from("room_players")
     .select("hand")
     .eq("room_id", currentRoomId)
@@ -255,21 +255,21 @@ async function playCard(card) {
     .single();
 
   const newHand = me.hand.filter(c => c !== card);
-  await supabase
+  await sb
     .from("room_players")
     .update({ hand: newHand })
     .eq("room_id", currentRoomId)
     .eq("player_id", myPlayerId);
 
   // 切换回合给对手
-  const { data: players } = await supabase
+  const { data: players } = await sb
     .from("room_players")
     .select("player_id")
     .eq("room_id", currentRoomId);
 
   const opponent = players.find(p => p.player_id !== myPlayerId);
   if (opponent) {
-    await supabase
+    await sb
       .from("rooms")
       .update({ turn: opponent.player_id })
       .eq("id", currentRoomId);
@@ -287,7 +287,7 @@ chatInput.addEventListener("keydown", e => {
 async function sendChat() {
   const message = chatInput.value.trim();
   if (!message || !currentRoomId) return;
-  await supabase.from("chats").insert({
+  await sb.from("chats").insert({
     room_id: currentRoomId,
     name: myName,
     message
@@ -313,5 +313,5 @@ function addSystemMessage(msg) {
 
 // 页面关闭时清理订阅
 window.addEventListener("beforeunload", () => {
-  if (realtimeChannel) supabase.removeChannel(realtimeChannel);
+  if (realtimeChannel) sb.removeChannel(realtimeChannel);
 });
